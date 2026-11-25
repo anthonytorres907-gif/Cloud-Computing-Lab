@@ -1,0 +1,170 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >-
+  Network Template: Sample template that creates a VPC with DNS and public IPs enabled.
+
+# This template creates:
+#   VPC
+#   Internet Gateway
+#   Public Route Table
+#   Public Subnet
+#   Bastion Security Group and EC2 instance
+
+# Assignment change: Make Bastion access and configuration reusable through parameters.
+Parameters:
+  # Assignment change: Default SSH access to the supplied workstation IP.
+  WorkstationIP:
+    Type: String
+    Description: Public IPv4 address allowed to SSH to the Bastion.
+    Default: '75.168.246.18'
+    AllowedPattern: '^(?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1?[0-9]?[0-9])$'
+    ConstraintDescription: Enter a valid IPv4 address without a CIDR suffix.
+
+  # Assignment change: Use the same Amazon Linux 2 SSM AMI lookup as lab-application.yaml.
+  AmazonLinuxAMIID:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+  # Assignment change: Allow the Bastion instance type to be selected at stack creation.
+  BastionInstanceType:
+    Type: String
+    Default: t2.micro
+
+  # Assignment change: Select an existing EC2 key pair by name.
+  BastionKeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Tony-key
+
+######################
+# Resources section
+######################
+
+Resources:
+
+  ## VPC
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      CidrBlock: 10.0.0.0/16
+
+  ## Internet Gateway
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  ## Public Route Table
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  ## Public Subnet
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select
+        - 0
+        - !GetAZs
+          Ref: AWS::Region
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetNetworkAclAssociation:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      NetworkAclId: !GetAtt
+        - VPC
+        - DefaultNetworkAcl
+
+  # Assignment change: Allow SSH only from the configured workstation address.
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH from the configured workstation only
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - Description: SSH from the configured workstation only
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Sub '${WorkstationIP}/32'
+      # Assignment change: Allow outbound traffic for Bastion updates and connections.
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Bastion Security Group
+
+  # Assignment change: Launch a public Bastion in the existing public subnet.
+  BastionInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmazonLinuxAMIID
+      InstanceType: !Ref BastionInstanceType
+      KeyName: !Ref BastionKeyPairName
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnet
+          GroupSet:
+            - !Ref BastionSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Bastion
+
+######################
+# Outputs section
+######################
+
+Outputs:
+
+  PublicSubnet:
+    Description: The subnet ID to use for public web servers
+    Value: !Ref PublicSubnet
+    Export:
+      Name: !Sub '${AWS::StackName}-SubnetID'
+
+  VPC:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${AWS::StackName}-VPCID'
+
+  # Assignment change: Export the Bastion security group for optional use by other stacks.
+  BastionSecurityGroup:
+    Description: Bastion security group ID
+    Value: !Ref BastionSecurityGroup
+    Export:
+      Name: !Sub '${AWS::StackName}-BastionSecurityGroupID'
+
+  # Assignment change: Show the Bastion DNS name in the network stack outputs.
+  BastionPublicDNS:
+    Description: Public DNS name of the Bastion
+    Value: !GetAtt BastionInstance.PublicDnsName
